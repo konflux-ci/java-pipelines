@@ -1,0 +1,41 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: task-lint
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/categories: Code Quality
+    tekton.dev/tags: linter
+    tekton.dev/displayName: "Task Linter"
+    tekton.dev/platforms: "linux/amd64"
+spec:
+  description: >-
+    A task for performing static analysis on Tekton tasks
+  workspaces:
+    - name: shared-workspace
+      description: A workspace that contains the fetched git repository.
+  params:
+    - name: args
+      type: array
+      description: extra args needs to append
+      default: ["--help"]
+  steps:
+    - name: ensure-params-not-in-script
+      image: quay.io/konflux-ci/task-runner:1.6.0@sha256:1abfe4e50d4e961d0fd9790202565f93ee650fe8dfc50932c94989acba10485f
+      # per https://kubernetes.io/docs/concepts/containers/images/#imagepullpolicy-defaulting
+      # the cluster will set imagePullPolicy to IfNotPresent
+      script: |
+        #!/bin/bash
+        for task in $(find task -name '*.yaml'); do
+          if yq '.spec?.steps[] | .script' $task | grep -q '\$(params\.'; then
+            FAILED_TASKS="$FAILED_TASKS $task"
+          fi
+        done
+        if [ -n "$FAILED_TASKS" ]; then
+          echo "Tasks contains params in script section (https://tekton.dev/docs/pipelines/tasks/#substituting-in-script-blocks)"
+          echo $FAILED_TASKS | tr ' ' '\n' | sort
+          exit 1
+        fi
+      workingDir: $(workspaces.shared-workspace.path)/source

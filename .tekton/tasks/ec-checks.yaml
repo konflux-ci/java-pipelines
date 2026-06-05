@@ -1,0 +1,82 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ec-checks
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/displayName: "Enterprise Contract Checks"
+    tekton.dev/platforms: "linux/amd64"
+spec:
+  description: >-
+    This task can be used to run enterprise contract checks
+  stepTemplate:
+    securityContext:
+      # runAsUser is needed because the different images used in this Task run as different users. Ideally,
+      # we'd let OpenShift do its thing and set a random UID with a common group ID for *all* containers
+      # in the namespace, but that is currently disabled so it's wild west.
+      runAsUser: 0
+    env:
+      - name: HOME
+        value: /tekton/home
+  steps:
+  - name: gather-tasks
+    image: quay.io/konflux-ci/task-runner:1.7.0
+    # per https://kubernetes.io/docs/concepts/containers/images/#imagepullpolicy-defaulting
+    # the cluster will set imagePullPolicy to IfNotPresent
+    workingDir: $(workspaces.source.path)/source
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+
+      source hack/ec-checks.sh
+
+      build_tasks_dir build_tasks-ec
+      all_tasks_dir all_tasks-ec
+      stepactions_dir stepactions-ec
+  - name: validate-all-tasks
+    workingDir: "$(workspaces.source.path)/source"
+    image: quay.io/conforma/cli:konflux@sha256:89331620b873411802cfb69a2ddba0de61541f02181c3b878caa334f5e09e844
+    script: |
+      set -euo pipefail
+
+      # Generate list of file parameters, e.g. --file foo.yaml --file bar.yaml
+      files=(all_tasks-ec/*.yaml)
+      args=${files[*]/#/--file }
+      echo "[DEBUG] Files parameter: ${args[*]}"
+
+      policy='./policies/all-tasks.yaml'
+
+      ec validate input --policy "${policy}" --output yaml --strict=true ${args[*]}
+  - name: validate-build-tasks
+    workingDir: "$(workspaces.source.path)/source"
+    image: quay.io/conforma/cli:konflux@sha256:89331620b873411802cfb69a2ddba0de61541f02181c3b878caa334f5e09e844
+    script: |
+      set -euo pipefail
+
+      # Generate list of file parameters, e.g. --file foo.yaml --file bar.yaml
+      files=(build_tasks-ec/*.yaml)
+      args=${files[*]/#/--file }
+      echo "[DEBUG] Files parameter: ${args[*]}"
+
+      policy='./policies/build-tasks.yaml'
+
+      ec validate input --policy "${policy}" --output yaml --strict=true ${args[*]}
+  - name: validate-step-actions
+    workingDir: "$(workspaces.source.path)/source"
+    image: quay.io/conforma/cli:konflux@sha256:89331620b873411802cfb69a2ddba0de61541f02181c3b878caa334f5e09e844
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+
+      # Generate array of file parameters, e.g. --file=foo.yaml --file=bar.yaml
+      files=( stepactions-ec/*.yaml )
+      readarray -t args < <(printf -- '--file=%s\n' "${files[@]}")
+      echo "[DEBUG] Files parameter: ${args[*]}"
+
+      policy='./policies/step-actions.yaml'
+      ec validate input --show-successes --policy "${policy}" --output yaml --strict=true "${args[@]}"
+
+  workspaces:
+    - name: source

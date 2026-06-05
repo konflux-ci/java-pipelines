@@ -1,0 +1,212 @@
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: java-pipelines-bundle-push
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "push"
+    pipelinesascode.tekton.dev/on-target-branch: "main"
+    pipelinesascode.tekton.dev/task: "[task/git-clone/0.1/git-clone.yaml, task/slack-webhook-notification/0.1/slack-webhook-notification.yaml, .tekton/tasks/ec-checks.yaml]"
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+spec:
+  params:
+    - name: git-url
+      value: "{{ repo_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: image-target
+      value: "quay.io/konflux-ci/appstudio-utils:latest"
+    - name: slack-webhook-notification-team
+      value: "integration-slack-alerts"
+    - name: console_url
+      value: "https://console-openshift-console.apps.kflux-prd-rh03.nnv1.p1.openshiftapps.com"
+  pipelineSpec:
+    params:
+      - description: 'Source Repository URL'
+        name: git-url
+        type: string
+      - description: 'Revision of the Source Repository'
+        name: revision
+        type: string
+      - name: slack-webhook-notification-team
+        default: ""
+        type: string
+    tasks:
+      - name: clone-repository
+        params:
+          - name: url
+            value: $(params.git-url)
+          - name: revision
+            value: "$(params.revision)"
+          - name: depth
+            value: "0"
+        taskRef:
+          name: git-clone
+        workspaces:
+          - name: output
+            workspace: workspace
+
+      - name: ec-task-checks
+        runAfter:
+          - clone-repository
+        taskRef:
+          name: ec-checks
+        workspaces:
+          - name: source
+            workspace: workspace
+      - name: build-bundles
+        params:
+          - name: revision
+            value: "$(params.revision)"
+        runAfter:
+          - ec-task-checks
+          - create-repositories-if-missing
+        workspaces:
+          - name: source
+            workspace: workspace
+        taskSpec:
+          params:
+            - name: revision
+              type: string
+          steps:
+            - name: build-bundles-konflux-ci
+              image: "$(params.image-target)"
+              workingDir: $(workspaces.source.path)/source
+              env:
+                - name: QUAY_NAMESPACE
+                  value: konflux-ci/tekton-catalog
+                - name: BUILD_TAG
+                  value: "$(params.revision)"
+                - name: SKIP_BUILD
+                  value: "1"
+                - name: SKIP_INSTALL
+                  value: "1"
+                - name: OUTPUT_TASK_BUNDLE_LIST
+                  value: $(workspaces.source.path)/task-bundle-list-konflux-ci
+                - name: OUTPUT_PIPELINE_BUNDLE_LIST
+                  value: $(workspaces.source.path)/pipeline-bundle-list-konflux-ci
+              script: |
+                #!/bin/bash
+                set -e
+                git config --global --add safe.directory "$PWD"
+                ./hack/build-and-push.sh
+            - name: build-bundles-redhat-appstudio
+              image: "$(params.image-target)"
+              workingDir: $(workspaces.source.path)/source
+              env:
+                - name: QUAY_NAMESPACE
+                  value: redhat-appstudio-tekton-catalog
+                - name: BUILD_TAG
+                  value: "$(params.revision)"
+                - name: SKIP_BUILD
+                  value: "1"
+                - name: SKIP_INSTALL
+                  value: "1"
+                - name: OUTPUT_TASK_BUNDLE_LIST
+                  value: $(workspaces.source.path)/task-bundle-list-appstudio
+                - name: OUTPUT_PIPELINE_BUNDLE_LIST
+                  value: $(workspaces.source.path)/pipeline-bundle-list-appstudio
+              script: |
+                #!/bin/bash
+                set -e
+                git config --global --add safe.directory "$PWD"
+                ./hack/build-and-push.sh
+              volumeMounts:
+                - mountPath: /tekton/home/.docker/config.json
+                  subPath: .dockerconfigjson
+                  name: quay-secret
+            - name: update-acceptable-bundles
+              image: "$(params.image-target)"
+              workingDir: $(workspaces.source.path)/source
+              env:
+              - name: REVISION
+                value: "$(params.revision)"
+              - name: GIT_URL
+                value: "$(params.git-url)"
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ git_auth_secret }}"
+                    key: "git-provider-token"
+              script: |
+                #!/bin/bash
+                set -euo pipefail
+                git config --global --add safe.directory /workspace/source/source
+
+                DATA_BUNDLE_REPO=quay.io/konflux-ci/tekton-catalog/data-acceptable-bundles
+                DATA_BUNDLE_TAG=$(date '+%s')
+                export DATA_BUNDLE_REPO DATA_BUNDLE_TAG
+
+                list=()
+                for f in "$@"; do
+                  [[ -f "$f" ]] && list+=("$f")
+                done
+
+                .tekton/scripts/build-acceptable-bundles.sh "${list[@]}"
+
+                echo -n "${DATA_BUNDLE_TAG}" > acceptable_bundle_tag
+              args:
+                - $(workspaces.source.path)/task-bundle-list-konflux-ci
+                - $(workspaces.source.path)/pipeline-bundle-list-konflux-ci
+                - $(workspaces.source.path)/task-bundle-list-appstudio
+                - $(workspaces.source.path)/pipeline-bundle-list-appstudio
+          volumes:
+          - name: quay-secret
+            secret:
+              secretName: redhat-appstudio-tekton-catalog-build-definitions-pull-secret
+          workspaces:
+            - name: source
+
+      - name: create-repositories-if-missing
+        runAfter:
+          - clone-repository
+        taskSpec:
+          steps:
+            - name: run-create-bundle-repos
+              image: "$(params.image-target)"
+              workingDir: $(workspaces.source.path)/source
+              script: |
+                #!/usr/bin/env bash
+                .tekton/scripts/create-task-pipeline-bundle-repos.sh
+              env:
+                - name: QUAY_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: konflux-ci-repo-creator
+                      key: quaytoken
+          workspaces:
+            - name: source
+        workspaces:
+          - name: source
+            workspace: workspace
+
+    workspaces:
+      - name: workspace
+        description: Workspace containing arbitrary artifacts used during the pipeline run.
+    finally:
+      - name: slack-webhook-notification
+        taskRef:
+          name: slack-webhook-notification
+        when:
+        - input: $(params.slack-webhook-notification-team)
+          operator: notin
+          values: [""]
+        - input: $(tasks.status)
+          operator: in
+          values: ["Failed"]
+        params:
+        - name: message
+          value: ":x: Tekton pipelineRun <$(params.console_url)/k8s/ns/$(context.pipelineRun.namespace)/tekton.dev~v1~PipelineRun/$(context.pipelineRun.name)|$(context.pipelineRun.name)> failed"
+        - name: key-name
+          value: $(params.slack-webhook-notification-team)
+  taskRunTemplate:
+    serviceAccountName: konflux-ci-sa
+  workspaces:
+    - name: workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
