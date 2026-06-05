@@ -161,13 +161,22 @@ for ITEM in "${TEST_ITEMS[@]}"; do
     PIPELINERUN=$(tkn p start "$TEST_NAME" -n "${TEST_NS}" -w name=tests-workspace,volumeClaimTemplateFile="$WORKSPACE_TEMPLATE"  -o json | jq -r '.metadata.name')
     echo "INFO: Started pipelinerun: $PIPELINERUN"
     sleep 1  # allow a second for the prun object to appear (including a status condition)
-    while [ "$(${KUBECTL_CMD} get pr "$PIPELINERUN" -n "${TEST_NS}" -o=jsonpath='{.status.conditions[0].status}')" == "Unknown" ]; do
+    PR_STATUS="Unknown"
+    while [ "$PR_STATUS" == "Unknown" ]; do
       echo "DEBUG: PipelineRun $PIPELINERUN is in progress (status Unknown). Waiting for update..."
       sleep 5
+      PR_STATUS=$(tkn pr describe "$PIPELINERUN" -n "${TEST_NS}" -o json 2>/dev/null \
+        | jq -r '.status.conditions[] | select(.type=="Succeeded") | .status // "Unknown"')
     done
-    tkn pr logs "$PIPELINERUN" -n "${TEST_NS}"
-
-    PR_STATUS=$(${KUBECTL_CMD} get pr "$PIPELINERUN" -n "${TEST_NS}" -o=jsonpath='{.status.conditions[0].status}')
+    echo "INFO: PipelineRun $PIPELINERUN completed with status: $PR_STATUS"
+    if ! timeout 5m tkn pr logs "$PIPELINERUN" -n "${TEST_NS}"; then
+      logs_exit=$?
+      if [ "$logs_exit" -eq 124 ]; then
+        echo "WARNING: tkn pr logs timed out after 5 minutes; continuing with result check"
+      else
+        exit "$logs_exit"
+      fi
+    fi
 
     ASSERT_TASK_FAILURE=$(yq '.metadata.annotations.test/assert-task-failure' < "$TEST_PATH")
     if [ "$ASSERT_TASK_FAILURE" != "null" ]; then

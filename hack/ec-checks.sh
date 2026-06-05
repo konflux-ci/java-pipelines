@@ -2,10 +2,10 @@
 
 set -e -u -o pipefail
 
-# extract the build container task name
-function build_container_task_name {
+# extract the build OCI artifact task name
+function build_oci_artifact_task_name {
   local pipeline=$1
-  cat $pipeline | yq '.spec.tasks[] | select(.name == "build-container") .taskRef.name' | tr -d '"'
+  cat $pipeline | yq '.spec.tasks[] | select(.name == "build-oci-artifact") .taskRef.name' | tr -d '"'
 }
 
 # the same build task can be used for multiple pipelines
@@ -37,8 +37,8 @@ function build_tasks_dir {
   oc kustomize --output $generated_pipelines_dir pipelines/
   for f in "${generated_pipelines_dir}"/*.yaml; 
   do
-    # find all tasks that are named "build-container" in each pipeline
-    name=$(build_container_task_name $f)
+    # find all tasks that are named "build-oci-artifact" in each pipeline
+    name=$(build_oci_artifact_task_name $f)
     if [[ -z $name ]]; then
       continue
     fi

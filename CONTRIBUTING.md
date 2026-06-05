@@ -6,6 +6,7 @@
 * [How to Report Issues](#how-to-report-issues)
 * [How to Submit Pull Requests](#how-to-submit-pull-requests)
   * [Development Workflow](#development-workflow)
+  * [Local Task Testing](#local-task-testing)
   * [Pull Request Guidelines](#pull-request-guidelines)
   * [Security Best Practices](#security-best-practices)
 
@@ -44,7 +45,50 @@ as OCI bundles.
    ```
 5. **Commit Changes**: See [commit guidelines](#pull-request-guidelines)
 
-### Pull Request Guidelines
+### Local Task Testing
+
+Task integration tests run in CI via [`.github/workflows/run-task-tests.yaml`](.github/workflows/run-task-tests.yaml).
+The [Makefile](Makefile) mirrors that workflow for local development.
+
+**Prerequisites:** `kubectl`, `kind`, `tkn`, `jq`, `yq`, `git`, and `openssl`.
+Install the Tekton CLI with `make install-tkn` if needed.
+
+```bash
+# One-time bootstrap (~15–30 min): kind cluster + konflux-ci dependencies
+make setup
+
+# Run tests for the default task (task/maven-deploy-oci-ta/0.1)
+make test
+
+# Run tests for a specific task directory
+make test TASK=task/maven-deploy-oci-ta/0.1
+
+# Run a single test pipeline
+make test TASK=task/maven-deploy-oci-ta/0.1/tests/test-maven-deploy-oci-ta-happy-path.yaml
+
+# Full CI-equivalent run (bootstrap + validate + test)
+make ci TASK=task/maven-deploy-oci-ta/0.1
+
+# Tear down the kind cluster
+make clean
+```
+
+If you already have a [konflux-ci](https://github.com/konflux-ci/konflux-ci) checkout,
+point the Makefile at it instead of cloning:
+
+```bash
+make setup KONFLUX_CI_DIR=/path/to/konflux-ci
+```
+
+`make validate-tasks` dry-runs `kubectl apply` for all tasks and pipelines.
+It removes `taskRef.version` from pipeline YAML in-place (same as CI); revert with
+`git checkout -- pipelines/` if needed.
+
+For troubleshooting (Docker Hub rate limits, inotify limits on Linux, registry setup),
+see the [konflux-ci bootstrapping guide](https://github.com/konflux-ci/konflux-ci?tab=readme-ov-file#bootstrapping-the-cluster).
+
+Run `make help` for all targets and configurable variables.
+
 
 **Commit Requirements:**
 - Write clear, descriptive commit titles under 50 characters
