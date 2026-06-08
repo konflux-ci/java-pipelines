@@ -210,12 +210,6 @@ GENERATED_PIPELINES_DIR=$(mktemp -d -p "$WORKDIR" pipelines.XXXXXXXX)
 declare -r GENERATED_PIPELINES_DIR
 oc kustomize --output "$GENERATED_PIPELINES_DIR" pipelines/
 
-# Generate YAML files separately since pipelines for core services have same .metadata.name.
-CORE_SERVICES_PIPELINES_DIR=$(mktemp -d -p "$WORKDIR" core-services-pipelines.XXXXXXXX)
-declare -r CORE_SERVICES_PIPELINES_DIR
-oc kustomize --output "$CORE_SERVICES_PIPELINES_DIR" pipelines/core-services/
-
-
 inject_bundle_ref_to_pipelines() {
     local -r task_name=$1
     local -r task_version=$2
@@ -230,7 +224,7 @@ inject_bundle_ref_to_pipelines() {
     }"
     echo "Bundle ref: ${bundle_ref}"
     local -r task_selector="select(.name == \"${task_name}\" and .version == \"${task_version}\")"
-    find "$GENERATED_PIPELINES_DIR" "$CORE_SERVICES_PIPELINES_DIR" -maxdepth 1 -type f -name '*.yaml' | \
+    find "$GENERATED_PIPELINES_DIR" -maxdepth 1 -type f -name '*.yaml' | \
         while read -r pipeline_file; do
             echo "Processing file: ${pipeline_file}"
             yq e "(.spec.tasks[].taskRef | ${task_selector}) |= ${bundle_ref}" -i "${pipeline_file}"
@@ -409,6 +403,15 @@ fetch_image_digest() {
         fi
     fi
     echo "$digest"
+}
+
+# Return 0 if skopeo stderr indicates the image or repository is missing.
+# Quay often returns exit status 1 (not 2) for missing repos or tags.
+skopeo_image_missing() {
+    local -r stderr_file=$1
+    grep -Eiq \
+        'manifest unknown|name unknown|repository not found|unauthorized: access to the requested resource is not authorized' \
+        "$stderr_file"
 }
 
 # Attach migration file to given task bundle.
@@ -726,10 +729,11 @@ build_push_tasks() {
             echo "info: use existing $task_bundle_with_digest" 1>&2
         elif [[ $skopeo_status -eq $SKOPEO_ES_GENERIC_ERR ]]; then
             regex="unknown: Tag ${task_bundle##*:}-${task_file_sha} was deleted or has expired"
-            if grep -q "$regex" /tmp/build_and_push_stderr.log; then
+            if grep -q "$regex" /tmp/build_and_push_stderr.log || skopeo_image_missing /tmp/build_and_push_stderr.log; then
                 build_new_bundle=true
             else
-                echo "error: The registry seems not working well. Failed to fetch digest of image ${image}. skopeo exit status: $skopeo_status" >&2
+                echo "error: The registry seems not working well. Failed to fetch digest of image ${task_bundle}-${task_file_sha}. skopeo exit status: $skopeo_status" >&2
+                cat /tmp/build_and_push_stderr.log >&2
                 return $skopeo_status
             fi
         elif [[ $skopeo_status -eq $SKOPEO_ES_IMAGE_NOT_FOUND ]]; then
@@ -791,16 +795,11 @@ if [ "$QUAY_NAMESPACE" == redhat-appstudio-tekton-catalog ]; then
 fi
 
 # Build Pipeline bundle with pipelines pointing to newly built task bundles
-for pipeline_yaml in "$GENERATED_PIPELINES_DIR"/*.yaml "$CORE_SERVICES_PIPELINES_DIR"/*.yaml
+for pipeline_yaml in "$GENERATED_PIPELINES_DIR"/*.yaml
 do
     pipeline_name=$(yq e '.metadata.name' "$pipeline_yaml")
     pipeline_description=$(yq e '.spec.description' "$pipeline_yaml" | head -n 1)
     pipeline_dir="pipelines/${pipeline_name}/"
-    core_services_ci=$(yq e '.metadata.annotations."appstudio.openshift.io/core-services-ci" // ""' "$pipeline_yaml")
-    if [ "$core_services_ci" == "1" ]; then
-        pipeline_name="core-services-${pipeline_name}"
-        BUILD_TAG=latest
-    fi
 
     repository=${TEST_REPO_NAME:-pipeline-${pipeline_name}}
     tag=${TEST_REPO_NAME:+${pipeline_name}-}$BUILD_TAG
