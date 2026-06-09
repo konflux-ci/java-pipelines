@@ -1,8 +1,8 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-*   @konflux-ci/build-maintainers
+*   @konflux-ci/java-pipeline-maintainers
 
-/task/          @konflux-ci/build-maintainers
-/pipelines/     @konflux-ci/build-maintainers
-/external-task/ @konflux-ci/build-maintainers
-/.tekton/       @konflux-ci/build-maintainers
+/task/          @konflux-ci/java-pipeline-maintainers
+/pipelines/     @konflux-ci/java-pipeline-maintainers
+/external-task/ @konflux-ci/java-pipeline-maintainers
+/.tekton/       @konflux-ci/java-pipeline-maintainers
