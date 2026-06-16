@@ -144,9 +144,6 @@ Pipeline integration test conventions:
   task integration tests, and pipeline integration tests when applicable.
 - Breaking task changes require migration scripts validated by CI.
 
-Before opening a PR, check [.github/pull_request_template.md](.github/pull_request_template.md)
-for coordination with open e2e-tests update PRs.
-
 ## Further reading
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — local testing, PR process

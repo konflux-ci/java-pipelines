@@ -29,6 +29,9 @@
 # - TEST_TASKS: script builds and pushes tasks only listed in this value. For
 #   testing purpose only. It is useful for checking the result task bundles
 #   generally. Note that, if used, the result pipelines are broken.
+#
+# - SKIP_PUSH: skip `tkn bundle push` (and related registry operations). Useful
+#   for PR CI smoke tests that prepare bundles without publishing images.
 
 set -e -o pipefail
 
@@ -322,6 +325,11 @@ build_push_task() {
         ANNOTATION_FLAGS+=("--annotate" "$(escape_tkn_bundle_arg "$annotation")")
     done
 
+    if [ -n "${SKIP_PUSH:-}" ]; then
+        echo "info: SKIP_PUSH is set, skipping push of task bundle ${task_bundle}" 1>&2
+        return 0
+    fi
+
     retry tkn bundle push "${ANNOTATION_FLAGS[@]}" -f "$prepared_task_file" "$task_bundle" \
         | save_ref "$task_bundle" "$OUTPUT_TASK_BUNDLE_LIST"
 
@@ -509,17 +517,6 @@ attach_migration_file() {
     return 0
 }
 
-
-# Generates task bundle with tag. The result bundle reference can be configured
-# by environment variable TEST_REPO_NAME for testing purpose.
-# Arguments: task_name, task_version
-# Task bundle reference is output to stdout.
-generate_tagged_task_bundle() {
-    local -r task_name=$1 task_version=$2
-    local -r repository=${TEST_REPO_NAME:-task-${task_name}}
-    local -r tag=${TEST_REPO_NAME:+${task_name}-}${task_version}
-    echo "quay.io/${QUAY_NAMESPACE}/${repository}:${tag}"
-}
 
 # Determine current and previous version for a given base task version.
 # If a task has versions 0.1, 0.2, 0.3, 0.4,
@@ -736,7 +733,7 @@ build_push_tasks() {
             continue
         fi
 
-        if should_skip_repo "$QUAY_NAMESPACE" "task-${task_name}"; then
+        if [ -z "${SKIP_PUSH:-}" ] && should_skip_repo "$QUAY_NAMESPACE" "task-${task_name}"; then
             echo "NOTE: not pushing task-$task_name:$task_version to $QUAY_NAMESPACE; the repo does not exist and $QUAY_NAMESPACE is deprecated"
             continue
         fi
@@ -764,50 +761,64 @@ build_push_tasks() {
             has_migration=true
         fi
 
-        digest=$(fetch_image_digest "${task_bundle}-${task_file_sha}" 2>/tmp/build_and_push_stderr.log)
-        skopeo_status=$?
-
         build_new_bundle=false
 
-        if [[ $skopeo_status -eq $ES_SUCCESS ]]; then
-            task_bundle_with_digest=${task_bundle}@${digest}
-            echo "info: use existing $task_bundle_with_digest" 1>&2
-        elif [[ $skopeo_status -eq $SKOPEO_ES_GENERIC_ERR ]]; then
-            regex="unknown: Tag ${task_bundle##*:}-${task_file_sha} was deleted or has expired"
-            if grep -q "$regex" /tmp/build_and_push_stderr.log || skopeo_image_missing /tmp/build_and_push_stderr.log; then
-                build_new_bundle=true
-            else
-                echo "error: The registry seems not working well. Failed to fetch digest of image ${task_bundle}-${task_file_sha}. skopeo exit status: $skopeo_status" >&2
-                cat /tmp/build_and_push_stderr.log >&2
-                return $skopeo_status
-            fi
-        elif [[ $skopeo_status -eq $SKOPEO_ES_IMAGE_NOT_FOUND ]]; then
+        if [ -n "${SKIP_PUSH:-}" ]; then
             build_new_bundle=true
         else
-            echo "error: unknown skopeo exit status $skopeo_status" >&2
-            return 1
+            digest=$(fetch_image_digest "${task_bundle}-${task_file_sha}" 2>/tmp/build_and_push_stderr.log)
+            skopeo_status=$?
+
+            if [[ $skopeo_status -eq $ES_SUCCESS ]]; then
+                task_bundle_with_digest=${task_bundle}@${digest}
+                echo "info: use existing $task_bundle_with_digest" 1>&2
+            elif [[ $skopeo_status -eq $SKOPEO_ES_GENERIC_ERR ]]; then
+                regex="unknown: Tag ${task_bundle##*:}-${task_file_sha} was deleted or has expired"
+                if grep -q "$regex" /tmp/build_and_push_stderr.log || skopeo_image_missing /tmp/build_and_push_stderr.log; then
+                    build_new_bundle=true
+                else
+                    echo "error: The registry seems not working well. Failed to fetch digest of image ${task_bundle}-${task_file_sha}. skopeo exit status: $skopeo_status" >&2
+                    cat /tmp/build_and_push_stderr.log >&2
+                    return $skopeo_status
+                fi
+            elif [[ $skopeo_status -eq $SKOPEO_ES_IMAGE_NOT_FOUND ]]; then
+                build_new_bundle=true
+            else
+                echo "error: unknown skopeo exit status $skopeo_status" >&2
+                return 1
+            fi
         fi
 
         if [[ $build_new_bundle == true ]]; then
             echo "info: finding the previous task bundle that has a migration" 1>&2
-            previous_migration_bundle_digest=$(find_previous_bundle_that_has_migration "$task_name" "$task_version")
+            if [ -n "${SKIP_PUSH:-}" ]; then
+                previous_migration_bundle_digest=
+            else
+                previous_migration_bundle_digest=$(find_previous_bundle_that_has_migration "$task_name" "$task_version")
+            fi
 
             echo "info: push new bundle $task_bundle" 1>&2
 
-            output=$(
+            if [ -n "${SKIP_PUSH:-}" ]; then
                 build_push_task "$task_dir" "$prepared_task_file" "$task_bundle" "$task_file_sha" \
                     "$has_migration" "$previous_migration_bundle_digest"
-            )
-            echo "$output" >&2
-            echo
+                task_bundle_with_digest="${task_bundle}"
+            else
+                output=$(
+                    build_push_task "$task_dir" "$prepared_task_file" "$task_bundle" "$task_file_sha" \
+                        "$has_migration" "$previous_migration_bundle_digest"
+                )
+                echo "$output" >&2
+                echo
 
-            # Grab just the digest of the bundle from the ouput. The tag is NOT included in the ouput.
-            digest="$(grep -m 1 "^Pushed Tekton Bundle to" <<<"$output" 2>/dev/null | grep -o -m 1 'sha256:[0-9a-f]*')"
-            task_bundle_with_digest="${task_bundle}@${digest}"
-            cache_set "${task_bundle}-${task_file_sha}" "${task_bundle_with_digest#*@}"
+                # Grab just the digest of the bundle from the ouput. The tag is NOT included in the ouput.
+                digest="$(grep -m 1 "^Pushed Tekton Bundle to" <<<"$output" 2>/dev/null | grep -o -m 1 'sha256:[0-9a-f]*')"
+                task_bundle_with_digest="${task_bundle}@${digest}"
+                cache_set "${task_bundle}-${task_file_sha}" "${task_bundle_with_digest#*@}"
+            fi
         fi
 
-        if [ "$has_migration" == "true" ]; then
+        if [ "$has_migration" == "true" ] && [ -z "${SKIP_PUSH:-}" ]; then
             attach_migration_file "$task_dir" "$concrete_task_version" "$task_bundle_with_digest" "$migration_file"
         fi
 
@@ -873,15 +884,19 @@ do
         ANNOTATION_FLAGS+=("--annotate" "$(escape_tkn_bundle_arg "$annotation")")
     done
 
-    retry tkn bundle push "${ANNOTATION_FLAGS[@]}" "$pipeline_bundle" -f "${pipeline_yaml}" | \
-        save_ref "$pipeline_bundle" "$OUTPUT_PIPELINE_BUNDLE_LIST"
+    if [ -n "${SKIP_PUSH:-}" ]; then
+        echo "info: SKIP_PUSH is set, skipping push of pipeline bundle ${pipeline_bundle}" 1>&2
+    else
+        retry tkn bundle push "${ANNOTATION_FLAGS[@]}" "$pipeline_bundle" -f "${pipeline_yaml}" | \
+            save_ref "$pipeline_bundle" "$OUTPUT_PIPELINE_BUNDLE_LIST"
+    fi
 
     [ "$pipeline_name" == "docker-build" ] && docker_pipeline_bundle=$pipeline_bundle
     [ "$pipeline_name" == "docker-build-oci-ta" ] && docker_oci_ta_pipeline_bundle=$pipeline_bundle
     [ "$pipeline_name" == "docker-build-oci-ta-min" ] && docker_oci_ta_min_pipeline_bundle=$pipeline_bundle
     [ "$pipeline_name" == "docker-build-multi-platform-oci-ta" ] && docker_multi_platform_oci_ta_pipeline_bundle=$pipeline_bundle
     [ "$pipeline_name" == "fbc-builder" ] && fbc_pipeline_bundle=$pipeline_bundle
-    if [ "$SKIP_DEVEL_TAG" == "" ] && is_official_repo "$QUAY_NAMESPACE" && [ -z "$TEST_REPO_NAME" ]; then
+    if [ -z "${SKIP_PUSH:-}" ] && [ "$SKIP_DEVEL_TAG" == "" ] && is_official_repo "$QUAY_NAMESPACE" && [ -z "$TEST_REPO_NAME" ]; then
         NEW_TAG="${pipeline_bundle%:*}:devel"
         skopeo copy "docker://${pipeline_bundle}" "docker://${NEW_TAG}"
     fi
